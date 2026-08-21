@@ -1,3 +1,73 @@
+# dranet-macvtap
+
+DRA driver (fork of [kubernetes-sigs/dranet](https://github.com/kubernetes-sigs/dranet))
+that gives KubeVirt VMs macvtap secondary NICs on a host parent interface,
+allocated through `resource.k8s.io/v1`.
+
+Driver name: `macvtap.petasus.io`.
+
+## How it works
+
+- Pools of macvtap slots are defined in a ConfigMap-backed config file
+  (`--config`, default `/etc/dranet-macvtap/config.yaml`):
+
+  ```yaml
+  pools:
+    - name: mgmt
+      parent: enP1p1s0f0np0        # default parent interface
+      parentByNode:
+        bundang-10f-33: eno4       # per-node override
+      capacity: 16
+      mode: bridge                 # bridge | private | vepa | passthru
+      mtu: 1500                    # informational attribute
+  ```
+
+  Each slot is published as a ResourceSlice device `<pool>-<index>` with the
+  attributes `k8s.cni.cncf.io/resourceName` (default `petasus.io/<pool>`) and
+  `macvtap.petasus.io/{pool,parent,mode,index,deviceType}`. A pool whose
+  parent interface does not exist on a node is skipped on that node. The file
+  is re-read periodically (`--config-reload-interval`), so pool edits need no
+  driver restart.
+
+- On `NodePrepareResources` the driver creates the macvtap child on the parent
+  (host-side name `mvt` + 12 hex chars, hashed from the device name) and resolves
+  its `/dev/tap<ifindex>` character device.
+
+- Via NRI, the tap character device is injected into the pod's containers
+  owned by uid/gid 107 (qemu in virt-launcher), and on `RunPodSandbox` the
+  link is moved into the pod network namespace, renamed and configured from
+  the claim's opaque config (dranet `NetworkConfig`):
+
+  ```yaml
+  config:
+    - requests: ["nic"]
+      opaque:
+        driver: macvtap.petasus.io
+        parameters:
+          interface:
+            name: pod0123456789a   # pod interface name KubeVirt expects
+            hardwareAddr: "02:00:00:aa:bb:cc"
+            mtu: 1500
+  ```
+
+- On pod stop the link is deleted; `NodeUnprepareResources` removes host-side
+  leftovers of pods that never started.
+
+KubeVirt consumes the device with the zero-code `macvtap` network binding
+plugin (`domainAttachmentType: tap`) and `spec.networks[].resourceClaim`
+(`NetworkDevicesWithDRA` feature gate).
+
+## Deploy
+
+```sh
+kubectl apply -f deployments/dranet-macvtap.yaml
+kubectl apply -f deployments/examples/bundang-10f-rtx.yaml   # pools + DeviceClass
+```
+
+The upstream dranet documentation below describes the inherited machinery.
+
+---
+
 # DRANET: DRA Kubernetes Network Driver
 
 DRANET is a Kubernetes Network Driver that uses Dynamic Resource Allocation

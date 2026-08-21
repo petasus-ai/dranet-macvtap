@@ -33,14 +33,9 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"golang.org/x/time/rate"
-	"sigs.k8s.io/dranet/pkg/cloudprovider"
-	"sigs.k8s.io/dranet/pkg/cloudprovider/discovery"
-	"sigs.k8s.io/dranet/pkg/cloudprovider/webhook"
 	"sigs.k8s.io/dranet/pkg/driver"
 	"sigs.k8s.io/dranet/pkg/features"
-	"sigs.k8s.io/dranet/pkg/inventory"
-	"sigs.k8s.io/dranet/pkg/pcidb"
+	"sigs.k8s.io/dranet/pkg/macvtap"
 
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/client-go/kubernetes"
@@ -51,23 +46,18 @@ import (
 )
 
 const (
-	driverName = "dra.net"
+	driverName = "macvtap.petasus.io"
 )
 
 var (
-	hostnameOverride  string
-	kubeconfig        string
-	bindAddress       string
-	celExpression     string
-	dbPath            string
-	minPollInterval   time.Duration
-	maxPollInterval   time.Duration
-	pollBurst         int
-	moveIBInterfaces  bool
-	cloudProviderHint string
-	profileProvider   string
-	webhookURL        string
-	featureGates      string
+	hostnameOverride string
+	kubeconfig       string
+	bindAddress      string
+	celExpression    string
+	dbPath           string
+	configPath       string
+	reloadInterval   time.Duration
+	featureGates     string
 
 	kubeletRootDir string
 
@@ -78,20 +68,15 @@ func init() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
 	flag.StringVar(&bindAddress, "bind-address", ":9177", "The IP address and port for the metrics and healthz server to serve on")
 	flag.StringVar(&hostnameOverride, "hostname-override", "", "If non-empty, will be used as the name of the Node that kube-network-policies is running on. If unset, the node name is assumed to be the same as the node's hostname.")
-	flag.StringVar(&celExpression, "filter", `!("dra.net/type" in attributes) || attributes["dra.net/type"].StringValue  != "veth"`, "CEL expression to filter network interface attributes (v1.DeviceAttribute).")
-	flag.StringVar(&dbPath, "db-path", filepath.Join("/var/run/dranet", "dranet.db"), "Path to the persistent bbolt database file. Set to an empty string to disable persistence and use in-memory state.")
-	flag.DurationVar(&minPollInterval, "inventory-min-poll-interval", 2*time.Second, "The minimum interval between two consecutive polls of the inventory.")
-	flag.DurationVar(&maxPollInterval, "inventory-max-poll-interval", 1*time.Minute, "The maximum interval between two consecutive polls of the inventory.")
-	flag.IntVar(&pollBurst, "inventory-poll-burst", 5, "The number of polls that can be run in a burst.")
-	flag.BoolVar(&moveIBInterfaces, "move-ib-interfaces", true, "If true, InfiniBand (IPoIB) network interfaces associated with PCI devices are moved into pod network namespace. If false, moving IB network interfaces are skipped and the underlying device is exposed as an IB-only RDMA device.")
-	flag.StringVar(&cloudProviderHint, "cloud-provider-hint", "", "Hint for the cloud provider that will be used to select the appropriate provider plugin. Supported values: (AWS, GCE, AZURE, OKE, ALIBABA, webhook, NONE). If left unset, the cloud provider is auto-detected.")
-	flag.StringVar(&profileProvider, "profile-provider", "cloud", "Provides user intent (cloud, webhook, none). 'cloud' falls back to the cloud-provider's native implementation.")
-	flag.StringVar(&webhookURL, "webhook-url", "", "URL for the webhook provider (required if using webhook for either provider)")
+	flag.StringVar(&celExpression, "filter", "", "CEL expression to filter network interface attributes (v1.DeviceAttribute).")
+	flag.StringVar(&dbPath, "db-path", filepath.Join("/var/run/dranet-macvtap", "state.db"), "Path to the persistent bbolt database file. Set to an empty string to disable persistence and use in-memory state.")
+	flag.StringVar(&configPath, "config", "/etc/dranet-macvtap/config.yaml", "Path to the macvtap pool configuration file.")
+	flag.DurationVar(&reloadInterval, "config-reload-interval", 30*time.Second, "How often the pool configuration file is re-read.")
 	flag.StringVar(&kubeletRootDir, "kubelet-root-dir", "/var/lib/kubelet", "The kubelet data directory (its --root-dir). The driver's registration socket lives under <dir>/plugins_registry and its dra.sock under <dir>/plugins/<driver-name>. Set this to match the kubelet --root-dir on clusters that relocate it.")
 	flag.StringVar(&featureGates, "feature-gates", "", "A set of key=value pairs that describe feature gates for alpha/experimental features.")
 
 	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: dranet [options]\n\n")
+		fmt.Fprint(os.Stderr, "Usage: dranet-macvtap [options]\n\n")
 		flag.PrintDefaults()
 	}
 }
@@ -125,10 +110,6 @@ func main() {
 	go func() {
 		_ = http.ListenAndServe(bindAddress, mux)
 	}()
-
-	if err := pcidb.Setup(); err != nil {
-		klog.Fatalf("Failed to setup PCI DB: %v", err)
-	}
 
 	var config *rest.Config
 	var err error
@@ -192,31 +173,13 @@ func main() {
 		}
 		opts = append(opts, driver.WithFilter(prg))
 	}
-	cloudInst, profProv, err := setupProviders(ctx, cloudProviderHint, profileProvider, webhookURL)
-	if err != nil {
-		klog.Fatalf("failed to setup providers: %v", err)
-	}
-
-	optsDb := []inventory.Option{
-		inventory.WithRateLimiter(rate.NewLimiter(rate.Every(minPollInterval), pollBurst)),
-		inventory.WithMaxPollInterval(maxPollInterval),
-		inventory.WithMoveIBInterfaces(moveIBInterfaces),
-	}
-
-	if cloudInst != nil {
-		optsDb = append(optsDb, inventory.WithCloudInstance(cloudInst))
-	}
-	if profProv != nil {
-		optsDb = append(optsDb, inventory.WithProfileProvider(profProv))
-	}
-
-	db := inventory.New(optsDb...)
+	db := macvtap.New(configPath, nodeName, macvtap.WithReloadInterval(reloadInterval))
 	opts = append(opts, driver.WithInventory(db))
-	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
+	macvtapDriver, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
 	if err != nil {
 		klog.Fatalf("driver failed to start: %v", err)
 	}
-	defer dranet.Stop(cancel)
+	defer macvtapDriver.Stop(cancel)
 
 	ready.Store(true)
 	klog.Info("driver started")
@@ -244,59 +207,4 @@ func printVersion() {
 		}
 	}
 	klog.Infof("dranet go %s build: %s time: %s", info.GoVersion, vcsRevision, vcsTime)
-}
-
-func setupProviders(ctx context.Context, cloudProviderHint string, profileProvider string, webhookURL string) (cloudprovider.CloudInstance, cloudprovider.ProfileProvider, error) {
-	var cloudInst cloudprovider.CloudInstance
-	var profProv cloudprovider.ProfileProvider
-	var err error
-
-	var hint discovery.CloudProviderHint
-	// Auto-discover cloud provider if not explicitly set
-	if cloudProviderHint == "" {
-		hint = discovery.DiscoverCloudProvider(ctx, webhookURL)
-	} else {
-		hint = discovery.CloudProviderHint(cloudProviderHint)
-	}
-
-	// Setup the Underlay (Hardware Discovery / Cloud Instance Info)
-	cloudInst, err = discovery.GetInstanceProperties(ctx, hint, webhookURL)
-	if err != nil {
-		klog.Infof("failed to initialize cloud provider %q: %v", hint, err)
-		cloudInst = nil
-	}
-
-	// Setup the Overlay (Profile Provider / User Intent)
-	switch profileProvider {
-	case "cloud":
-		if p, ok := cloudInst.(cloudprovider.ProfileProvider); ok {
-			profProv = p
-		} else {
-			profProv = nil
-		}
-	case "webhook":
-		if webhookURL == "" {
-			return nil, nil, fmt.Errorf("--webhook-url is required when using the webhook profile provider")
-		}
-		var wh *webhook.WebhookProvider
-		if existing, ok := cloudInst.(*webhook.WebhookProvider); ok {
-			wh = existing
-		} else {
-			wh, err = webhook.NewWebhookProvider(ctx, webhookURL)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to initialize webhook profile provider: %v", err)
-			}
-		}
-
-		if !wh.HasProfileProvider() {
-			return nil, nil, fmt.Errorf("webhook at %q does not support ProfileProvider capability", webhookURL)
-		}
-		profProv = wh
-	case "none":
-		profProv = nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported profile provider: %s", profileProvider)
-	}
-
-	return cloudInst, profProv, nil
 }

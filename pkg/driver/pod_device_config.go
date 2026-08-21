@@ -65,6 +65,14 @@ type DeviceConfig struct {
 	// RDMADevice holds RDMA-specific configurations if the network device
 	// has associated RDMA capabilities.
 	RDMADevice RDMAConfig `json:"rdmaDevice,omitempty"`
+
+	// MacvtapHostIfName is the host-side link name of the macvtap child the
+	// driver created for this device; empty for non-macvtap devices.
+	MacvtapHostIfName string `json:"macvtapHostIfName,omitempty"`
+
+	// TapDevice is the tap character device of the macvtap child, injected
+	// into the Pod's containers so qemu can open it.
+	TapDevice *LinuxDevice `json:"tapDevice,omitempty"`
 }
 
 // RDMAConfig contains parameters for setting up an RDMA device associated

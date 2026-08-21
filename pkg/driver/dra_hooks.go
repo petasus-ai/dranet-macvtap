@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/dranet/pkg/features"
 	"sigs.k8s.io/dranet/pkg/filter"
 	"sigs.k8s.io/dranet/pkg/inventory"
+	"sigs.k8s.io/dranet/pkg/macvtap"
 
 	"github.com/Mellanox/rdmamap"
 	"github.com/vishvananda/netlink"
@@ -295,6 +296,23 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			continue
 		}
 
+		// Macvtap pool device: the netdev does not exist until the driver
+		// creates the child link on the pool's parent interface.
+		if spec, isMacvtap := macvtapSpecOf(np.netdb, result.Device); isMacvtap {
+			if netconf.Interface.DHCP != nil && *netconf.Interface.DHCP {
+				errorList = append(errorList, fmt.Errorf("DHCP is not supported for macvtap device %s", result.Device))
+				continue
+			}
+			hostIfName := macvtap.HostIfName(result.Device)
+			tapDev, err := ensureMacvtapDevice(hostIfName, spec)
+			if err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to create macvtap for device %s: %v", result.Device, err))
+				continue
+			}
+			deviceCfg.MacvtapHostIfName = hostIfName
+			deviceCfg.TapDevice = &tapDev
+		}
+
 		ifName, err := np.netdb.GetNetInterfaceName(result.Device)
 		if err != nil {
 			errorList = append(errorList, fmt.Errorf("failed to get network interface name for device %s: %v", result.Device, err))
@@ -526,6 +544,14 @@ func (np *NetworkDriver) unprepareResourceClaim(_ context.Context, claim kubelet
 				if devCfg.NetworkInterfaceConfigInPod.Profile != "" {
 					if err := np.netdb.ReleaseProfileConfig(deviceName, claim.UID, &devCfg.NetworkInterfaceConfigInPod); err != nil {
 						klog.Errorf("failed to release profile config for claim %v: %v", claim.NamespacedName, err)
+					}
+				}
+				// Remove a macvtap child that never left the host namespace
+				// (the pod was never started); links moved into a pod netns
+				// die with the namespace.
+				if devCfg.MacvtapHostIfName != "" {
+					if err := deleteHostLink(devCfg.MacvtapHostIfName); err != nil {
+						klog.Errorf("failed to delete macvtap link %s for claim %v: %v", devCfg.MacvtapHostIfName, claim.NamespacedName, err)
 					}
 				}
 			}

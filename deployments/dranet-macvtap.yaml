@@ -1,0 +1,168 @@
+# dranet-macvtap: DRA kubelet plugin that advertises macvtap slot pools on
+# host parent interfaces and attaches macvtap children (plus their /dev/tapN
+# character device) to pods. Pool definitions come from the
+# dranet-macvtap-config ConfigMap; the file is re-read periodically, so
+# pool edits need no driver restart.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: dranet-macvtap
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceslices
+    verbs:
+      - list
+      - watch
+      - create
+      - update
+      - delete
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims
+      - deviceclasses
+    verbs:
+      - get
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims/status
+    verbs:
+      - patch
+      - update
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims/driver
+    verbs:
+      - associated-node:patch
+      - associated-node:update
+    resourceNames:
+      - macvtap.petasus.io
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: dranet-macvtap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dranet-macvtap
+subjects:
+  - kind: ServiceAccount
+    name: dranet-macvtap
+    namespace: dra-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dranet-macvtap
+  namespace: dra-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dranet-macvtap
+  namespace: dra-system
+  labels:
+    app: dranet-macvtap
+spec:
+  selector:
+    matchLabels:
+      app: dranet-macvtap
+  template:
+    metadata:
+      labels:
+        app: dranet-macvtap
+    spec:
+      # No control-plane toleration: VMs never schedule there, so the driver
+      # doesn't either.
+      hostNetwork: true
+      serviceAccountName: dranet-macvtap
+      containers:
+        - name: dranet-macvtap
+          args:
+            - /dranet
+            - --v=4
+            - --hostname-override=$(NODE_NAME)
+          image: quay.io/edgestack/dranet-macvtap:v0.1.0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "50Mi"
+          securityContext:
+            privileged: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 9177
+            failureThreshold: 12
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9177
+          volumeMounts:
+            - name: kubelet-plugins
+              mountPath: /var/lib/kubelet/plugins
+            - name: plugin-registry
+              mountPath: /var/lib/kubelet/plugins_registry
+            - name: nri-plugin
+              mountPath: /var/run/nri
+            - name: netns
+              mountPath: /var/run/netns
+              mountPropagation: HostToContainer
+            # /dev/tapN nodes appear on the host when macvtap links are
+            # created; the driver stats them to build container device specs.
+            - name: dev
+              mountPath: /dev
+              mountPropagation: HostToContainer
+            - name: state
+              mountPath: /var/run/dranet-macvtap
+            - name: config
+              mountPath: /etc/dranet-macvtap
+              readOnly: true
+      volumes:
+        - name: kubelet-plugins
+          hostPath:
+            path: /var/lib/kubelet/plugins
+        - name: plugin-registry
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+        - name: nri-plugin
+          hostPath:
+            path: /var/run/nri
+        - name: netns
+          hostPath:
+            path: /var/run/netns
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: state
+          hostPath:
+            path: /var/run/dranet-macvtap
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: dranet-macvtap-config

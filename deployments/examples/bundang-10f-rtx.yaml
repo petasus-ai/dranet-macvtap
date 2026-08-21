@@ -1,0 +1,30 @@
+# Example pool configuration and DeviceClass for the bundang-10f-rtx cluster:
+# one "mgmt" pool of macvtap slots on the 10.24.3.0/24 management interface,
+# which is enP1p1s0f0np0 on the aarch64 workers and eno4 on bundang-10f-33.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dranet-macvtap-config
+  namespace: dra-system
+data:
+  config.yaml: |
+    pools:
+      - name: mgmt
+        parent: enP1p1s0f0np0
+        parentByNode:
+          bundang-10f-33: eno4
+        capacity: 16
+        mode: bridge
+        mtu: 1500
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: mgmt.macvtap.petasus.io
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "macvtap.petasus.io" &&
+          "resourceName" in device.attributes["k8s.cni.cncf.io"] &&
+          device.attributes["k8s.cni.cncf.io"].resourceName == "petasus.io/mgmt"

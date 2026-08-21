@@ -113,6 +113,20 @@ func (np *NetworkDriver) createContainer(_ context.Context, _ *api.PodSandbox, _
 				Minor: dev.Minor,
 			})
 		}
+		// Inject the macvtap tap character device owned by qemu so
+		// virt-launcher can hand it to the VM.
+		if dev := config.TapDevice; dev != nil && !devPaths.Has(dev.Path) {
+			devPaths.Insert(dev.Path)
+			adjust.AddDevice(&api.LinuxDevice{
+				Path:     dev.Path,
+				Type:     dev.Type,
+				Major:    dev.Major,
+				Minor:    dev.Minor,
+				FileMode: api.FileMode(dev.FileMode),
+				Uid:      api.UInt32(dev.UID),
+				Gid:      api.UInt32(dev.GID),
+			})
+		}
 	}
 
 	return adjust, nil, nil
@@ -402,7 +416,16 @@ func (np *NetworkDriver) stopPodSandbox(ctx context.Context, pod *api.PodSandbox
 
 		netdevDetached := false
 		ifName := config.NetworkInterfaceConfigInPod.Interface.Name
-		if ifName != "" {
+		if config.MacvtapHostIfName != "" {
+			// A macvtap child is never returned to the host: delete it in the
+			// pod namespace (the kernel would destroy it with the namespace
+			// anyway) and let UnprepareResourceClaims cover host-side leftovers.
+			if ifName != "" {
+				if err := deleteLinkInNS(ns, ifName); err != nil {
+					logger.Error(err, "Failed to delete macvtap device", "device", deviceName)
+				}
+			}
+		} else if ifName != "" {
 			if err := nsDetachNetdev(ns, ifName, config.NetworkInterfaceConfigInHost.Interface.Name); err != nil {
 				logger.Error(err, "Failed to return network device", "device", deviceName)
 			} else {
