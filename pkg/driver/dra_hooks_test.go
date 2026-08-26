@@ -1019,6 +1019,7 @@ func testPrepareResourceClaim_Namespaced(t *testing.T) {
 							Namespace: "default",
 							Name:      "claim-ib-single",
 						},
+						DeviceName:     "ib-dev-0",
 						DeviceSnapshot: &resourcev1.Device{Name: "ib-dev-0"},
 						RDMADevice: RDMAConfig{
 							LinkDev: "fake_mlx5_0",
@@ -1069,6 +1070,7 @@ func testPrepareResourceClaim_Namespaced(t *testing.T) {
 							Namespace: "default",
 							Name:      "claim-ib-multi",
 						},
+						DeviceName:     "ib-dev-0",
 						DeviceSnapshot: &resourcev1.Device{Name: "ib-dev-0"},
 						RDMADevice: RDMAConfig{
 							LinkDev: "fake_mlx5_0",
@@ -1079,6 +1081,7 @@ func testPrepareResourceClaim_Namespaced(t *testing.T) {
 							Namespace: "default",
 							Name:      "claim-ib-multi",
 						},
+						DeviceName:     "ib-dev-1",
 						DeviceSnapshot: &resourcev1.Device{Name: "ib-dev-1"},
 						RDMADevice: RDMAConfig{
 							LinkDev: "fake_mlx5_1",
@@ -1121,6 +1124,7 @@ func testPrepareResourceClaim_Namespaced(t *testing.T) {
 							Namespace: "default",
 							Name:      "claim-net-single",
 						},
+						DeviceName:     "net-dev-0",
 						DeviceSnapshot: &resourcev1.Device{Name: "net-dev-0"},
 						NetworkInterfaceConfigInHost: apis.NetworkConfig{
 							Interface: apis.InterfaceConfig{

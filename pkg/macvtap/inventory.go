@@ -19,8 +19,12 @@ package macvtap
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
+	"net"
 	"reflect"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +32,7 @@ import (
 	"sigs.k8s.io/dranet/pkg/apis"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -37,30 +42,41 @@ const (
 	// AttrDomain is the attribute domain of this driver's device attributes.
 	AttrDomain = "macvtap.petasus.io"
 
-	// AttrResourceName carries the pool's logical resource name; the
-	// management platform joins DeviceClasses and networks on it.
-	AttrResourceName = "k8s.cni.cncf.io/resourceName"
+	// SlotsCapacity is the consumable capacity each parent device publishes;
+	// every allocation consumes exactly one slot (request policy default and
+	// only valid value).
+	SlotsCapacity = AttrDomain + "/slots"
 
-	// DefaultResourceNamePrefix prefixes pool names into resource names.
-	DefaultResourceNamePrefix = "petasus.io/"
+	// SlotsPerParent bounds how many macvtap children one parent carries.
+	SlotsPerParent = 999
 
-	defaultReloadInterval = 30 * time.Second
+	defaultRescanInterval = 30 * time.Second
 )
 
 // Spec describes how to materialize a macvtap child for one published device.
 type Spec struct {
-	Pool   string
 	Parent string
 	Mode   netlink.MacvlanMode
 }
 
-// Inventory publishes macvtap pool slots as DRA devices. Pools are defined in
-// a config file (mounted from a ConfigMap) and re-read periodically, so pool
-// changes propagate without a driver restart.
+// NetlinkOps abstracts the netlink queries discovery needs (for testing).
+type NetlinkOps interface {
+	LinkList() ([]netlink.Link, error)
+}
+
+type defaultNetlink struct{}
+
+func (defaultNetlink) LinkList() ([]netlink.Link, error) { return netlink.LinkList() }
+
+// Inventory publishes every eligible host parent interface as ONE shared DRA
+// device (allowMultipleAllocations with a slots capacity); selection policy
+// lives in DeviceClass CEL on the management side, and the driver creates one
+// macvtap child per allocated claim at prepare time. The node's links are
+// rescanned periodically, so parent add/remove propagates without a restart.
 type Inventory struct {
-	configPath     string
 	nodeName       string
-	reloadInterval time.Duration
+	rescanInterval time.Duration
+	netlink        NetlinkOps
 
 	mu        sync.RWMutex
 	devices   map[string]resourceapi.Device
@@ -74,20 +90,27 @@ type Inventory struct {
 // Option customizes the Inventory.
 type Option func(*Inventory)
 
-// WithReloadInterval overrides how often the config file is re-read.
-func WithReloadInterval(d time.Duration) Option {
+// WithRescanInterval overrides how often the node's links are rescanned.
+func WithRescanInterval(d time.Duration) Option {
 	return func(inv *Inventory) {
-		inv.reloadInterval = d
+		inv.rescanInterval = d
 	}
 }
 
-// New creates an Inventory that reads pool definitions from configPath and
-// advertises the slots whose parent interface exists on this node.
-func New(configPath, nodeName string, opts ...Option) *Inventory {
+// WithNetlink overrides the netlink implementation (for testing).
+func WithNetlink(n NetlinkOps) Option {
+	return func(inv *Inventory) {
+		inv.netlink = n
+	}
+}
+
+// New creates an Inventory that discovers and advertises the node's macvtap
+// parent interfaces.
+func New(nodeName string, opts ...Option) *Inventory {
 	inv := &Inventory{
-		configPath:     configPath,
 		nodeName:       nodeName,
-		reloadInterval: defaultReloadInterval,
+		rescanInterval: defaultRescanInterval,
+		netlink:        defaultNetlink{},
 		devices:        map[string]resourceapi.Device{},
 		specs:          map[string]Spec{},
 		notifications:  make(chan []resourceapi.Device, 1),
@@ -99,11 +122,11 @@ func New(configPath, nodeName string, opts ...Option) *Inventory {
 	return inv
 }
 
-// Run keeps the published device list in sync with the config file and the
-// node's link state until the context is cancelled.
+// Run keeps the published device list in sync with the node's link state
+// until the context is cancelled.
 func (inv *Inventory) Run(ctx context.Context) error {
 	inv.sync(true)
-	ticker := time.NewTicker(inv.reloadInterval)
+	ticker := time.NewTicker(inv.rescanInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -117,9 +140,9 @@ func (inv *Inventory) Run(ctx context.Context) error {
 	}
 }
 
-// sync reloads the config, rebuilds the device list and notifies the
-// publisher when the list changed (or unconditionally on the first pass, so
-// an empty pool set still results in an initial publish).
+// sync rebuilds the device list and notifies the publisher when the list
+// changed (or unconditionally on the first pass, so an empty device set
+// still results in an initial publish).
 func (inv *Inventory) sync(force bool) {
 	devices, specs := inv.buildDevices()
 
@@ -145,60 +168,96 @@ func (inv *Inventory) sync(force bool) {
 	}
 }
 
+// eligibleParentTypes are the netlink link kinds a macvtap child can sit on:
+// physical NICs ("device"), bonds and VLAN sub-interfaces. Everything virtual
+// (veth, bridge, macvlan/macvtap children, tunnels) is excluded.
+var eligibleParentTypes = map[string]bool{
+	"device": true,
+	"bond":   true,
+	"vlan":   true,
+}
+
 func (inv *Inventory) buildDevices() ([]resourceapi.Device, map[string]Spec) {
 	devices := []resourceapi.Device{}
 	specs := map[string]Spec{}
 
-	config, err := LoadConfig(inv.configPath)
+	links, err := inv.netlink.LinkList()
 	if err != nil {
-		klog.Errorf("macvtap inventory: failed to load config %s, advertising nothing: %v", inv.configPath, err)
+		klog.Errorf("macvtap inventory: failed to list links, advertising nothing: %v", err)
 		return devices, specs
 	}
 
-	for i := range config.Pools {
-		pool := &config.Pools[i]
-		parent := pool.ParentForNode(inv.nodeName)
-		if parent == "" {
-			klog.V(4).Infof("macvtap inventory: pool %q has no parent for node %s, skipping", pool.Name, inv.nodeName)
+	for _, link := range links {
+		attrs := link.Attrs()
+		if attrs == nil || attrs.Name == "" {
 			continue
 		}
-		if _, err := netlink.LinkByName(parent); err != nil {
-			klog.Warningf("macvtap inventory: pool %q parent %q not found on node %s, skipping: %v", pool.Name, parent, inv.nodeName, err)
+		if attrs.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		resourceName := pool.ResourceName
-		if resourceName == "" {
-			resourceName = DefaultResourceNamePrefix + pool.Name
+		// Macvtap children need an Ethernet parent (no InfiniBand, no tun).
+		if attrs.EncapType != "ether" {
+			continue
 		}
-		for idx := 0; idx < pool.Capacity; idx++ {
-			name := pool.DeviceName(idx)
-			device := resourceapi.Device{
-				Name: name,
-				Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					AttrResourceName:           {StringValue: ptr.To(resourceName)},
-					AttrDomain + "/pool":       {StringValue: ptr.To(pool.Name)},
-					AttrDomain + "/parent":     {StringValue: ptr.To(parent)},
-					AttrDomain + "/mode":       {StringValue: ptr.To(cmpOr(pool.Mode, "bridge"))},
-					AttrDomain + "/index":      {IntValue: ptr.To(int64(idx))},
-					AttrDomain + "/deviceType": {StringValue: ptr.To("macvtap")},
+		if !eligibleParentTypes[link.Type()] {
+			continue
+		}
+		name := deviceNameForIfName(attrs.Name)
+		if _, dup := specs[name]; dup {
+			klog.Warningf("macvtap inventory: device name %q for link %q collides with another link, skipping", name, attrs.Name)
+			continue
+		}
+		device := resourceapi.Device{
+			Name:                     name,
+			AllowMultipleAllocations: ptr.To(true),
+			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+				AttrDomain + "/ifName":     {StringValue: ptr.To(attrs.Name)},
+				AttrDomain + "/mtu":        {IntValue: ptr.To(int64(attrs.MTU))},
+				AttrDomain + "/state":      {StringValue: ptr.To(strings.ToLower(attrs.OperState.String()))},
+				AttrDomain + "/linkKind":   {StringValue: ptr.To(link.Type())},
+				AttrDomain + "/deviceType": {StringValue: ptr.To("macvtap-parent")},
+			},
+			// One slot per claim: the default applies when a request carries
+			// no capacity entry, and the single valid value rejects anything
+			// else.
+			Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+				SlotsCapacity: {
+					Value: *resource.NewQuantity(SlotsPerParent, resource.DecimalSI),
+					RequestPolicy: &resourceapi.CapacityRequestPolicy{
+						Default:     resource.NewQuantity(1, resource.DecimalSI),
+						ValidValues: []resource.Quantity{*resource.NewQuantity(1, resource.DecimalSI)},
+					},
 				},
-			}
-			if pool.MTU > 0 {
-				device.Attributes[AttrDomain+"/mtu"] = resourceapi.DeviceAttribute{IntValue: ptr.To(int64(pool.MTU))}
-			}
-			devices = append(devices, device)
-			specs[name] = Spec{Pool: pool.Name, Parent: parent, Mode: pool.MacvtapMode()}
+			},
 		}
+		devices = append(devices, device)
+		specs[name] = Spec{Parent: attrs.Name, Mode: netlink.MACVLAN_MODE_BRIDGE}
 	}
 	sort.Slice(devices, func(i, j int) bool { return devices[i].Name < devices[j].Name })
 	return devices, specs
 }
 
-func cmpOr(v, fallback string) string {
-	if v != "" {
-		return v
-	}
-	return fallback
+// nonDNSLabelChar matches everything a DNS-1123 label cannot carry.
+var nonDNSLabelChar = regexp.MustCompile(`[^a-z0-9-]`)
+
+// deviceNameForIfName turns a host interface name into a DRA device name
+// (DNS-1123 label), e.g. "eth0.100" -> "eth0-100".
+func deviceNameForIfName(ifName string) string {
+	return nonDNSLabelChar.ReplaceAllString(strings.ToLower(ifName), "-")
+}
+
+// HostIfName returns the host-side link name of the macvtap child created for
+// one allocation. A parent device is shared (allowMultipleAllocations), so
+// the name is derived from the claim and request, not the device alone.
+// Hashed to a fixed 15 chars (IFNAMSIZ-1).
+func HostIfName(deviceName string, claimUID types.UID, requestName string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(deviceName))
+	_, _ = h.Write([]byte("/"))
+	_, _ = h.Write([]byte(claimUID))
+	_, _ = h.Write([]byte("/"))
+	_, _ = h.Write([]byte(requestName))
+	return fmt.Sprintf("mvt%012x", h.Sum64()&0xffffffffffff)
 }
 
 // GetResources returns the channel the publisher consumes device lists from.
@@ -222,23 +281,18 @@ func (inv *Inventory) GetMacvtapSpec(deviceName string) (Spec, bool) {
 	return spec, ok
 }
 
-// GetNetInterfaceName returns the host-side link name of the macvtap child
-// that PrepareResourceClaims creates for the device.
+// GetNetInterfaceName never resolves: the macvtap child of a shared parent
+// device is per-claim and only exists once the prepare path created it.
 func (inv *Inventory) GetNetInterfaceName(deviceName string) (string, error) {
-	inv.mu.RLock()
-	defer inv.mu.RUnlock()
-	if _, ok := inv.devices[deviceName]; !ok {
-		return "", fmt.Errorf("device %s not found", deviceName)
-	}
-	return HostIfName(deviceName), nil
+	return "", fmt.Errorf("device %s is a shared macvtap parent; the child link is per-claim", deviceName)
 }
 
-// IsIBOnlyDevice is always false: every device is a macvtap slot.
+// IsIBOnlyDevice is always false: every device is an Ethernet parent.
 func (inv *Inventory) IsIBOnlyDevice(_ string) bool {
 	return false
 }
 
-// GetRDMADeviceName never resolves: macvtap slots carry no RDMA device.
+// GetRDMADeviceName never resolves: macvtap parents carry no RDMA device.
 func (inv *Inventory) GetRDMADeviceName(deviceName string) (string, error) {
 	return "", fmt.Errorf("device %s has no RDMA device", deviceName)
 }
@@ -248,7 +302,7 @@ func (inv *Inventory) GetDeviceConfig(_ string) (*apis.NetworkConfig, bool) {
 	return nil, false
 }
 
-// RequestRescan triggers an immediate config reload and republish check.
+// RequestRescan triggers an immediate link rescan and republish check.
 func (inv *Inventory) RequestRescan() {
 	select {
 	case inv.rescan <- struct{}{}:

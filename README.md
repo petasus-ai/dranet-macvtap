@@ -8,30 +8,21 @@ Driver name: `macvtap.petasus.io`.
 
 ## How it works
 
-- Pools of macvtap slots are defined in a ConfigMap-backed config file
-  (`--config`, default `/etc/dranet-macvtap/config.yaml`):
+- Every eligible host parent interface — physical NICs, bonds and VLAN
+  sub-interfaces (Ethernet encapsulation, not loopback) — is auto-discovered
+  and published as ONE shared ResourceSlice device (`allowMultipleAllocations:
+  true`) with the attributes
+  `macvtap.petasus.io/{ifName,mtu,state,linkKind,deviceType}` and the
+  consumable capacity `macvtap.petasus.io/slots: 999` (request policy: every
+  allocation consumes exactly 1 slot). There is no driver configuration;
+  selection policy lives entirely in DeviceClass CEL over the published
+  attributes. The node's links are rescanned periodically
+  (`--rescan-interval`), so parent add/remove needs no driver restart.
 
-  ```yaml
-  pools:
-    - name: mgmt
-      parent: enP1p1s0f0np0        # default parent interface
-      parentByNode:
-        bundang-10f-33: eno4       # per-node override
-      capacity: 16
-      mode: bridge                 # bridge | private | vepa | passthru
-      mtu: 1500                    # informational attribute
-  ```
-
-  Each slot is published as a ResourceSlice device `<pool>-<index>` with the
-  attributes `k8s.cni.cncf.io/resourceName` (default `petasus.io/<pool>`) and
-  `macvtap.petasus.io/{pool,parent,mode,index,deviceType}`. A pool whose
-  parent interface does not exist on a node is skipped on that node. The file
-  is re-read periodically (`--config-reload-interval`), so pool edits need no
-  driver restart.
-
-- On `NodePrepareResources` the driver creates the macvtap child on the parent
-  (host-side name `mvt` + 12 hex chars, hashed from the device name) and resolves
-  its `/dev/tap<ifindex>` character device.
+- On `NodePrepareResources` the driver creates the per-claim macvtap child on
+  the parent (host-side name `mvt` + 12 hex chars, hashed from device + claim
+  + request — a shared parent backs several claims) in bridge mode and
+  resolves its `/dev/tap<ifindex>` character device.
 
 - Via NRI, the tap character device is injected into the pod's containers
   owned by uid/gid 107 (qemu in virt-launcher), and on `RunPodSandbox` the
@@ -61,7 +52,7 @@ plugin (`domainAttachmentType: tap`) and `spec.networks[].resourceClaim`
 
 ```sh
 kubectl apply -f deployments/dranet-macvtap.yaml
-kubectl apply -f deployments/examples/bundang-10f-rtx.yaml   # pools + DeviceClass
+kubectl apply -f deployments/examples/bundang-10f-rtx.yaml   # example DeviceClass + claim
 ```
 
 The upstream dranet documentation below describes the inherited machinery.

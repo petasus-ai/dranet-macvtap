@@ -55,8 +55,7 @@ var (
 	bindAddress      string
 	celExpression    string
 	dbPath           string
-	configPath       string
-	reloadInterval   time.Duration
+	rescanInterval   time.Duration
 	featureGates     string
 
 	kubeletRootDir string
@@ -70,8 +69,7 @@ func init() {
 	flag.StringVar(&hostnameOverride, "hostname-override", "", "If non-empty, will be used as the name of the Node that kube-network-policies is running on. If unset, the node name is assumed to be the same as the node's hostname.")
 	flag.StringVar(&celExpression, "filter", "", "CEL expression to filter network interface attributes (v1.DeviceAttribute).")
 	flag.StringVar(&dbPath, "db-path", filepath.Join("/var/run/dranet-macvtap", "state.db"), "Path to the persistent bbolt database file. Set to an empty string to disable persistence and use in-memory state.")
-	flag.StringVar(&configPath, "config", "/etc/dranet-macvtap/config.yaml", "Path to the macvtap pool configuration file.")
-	flag.DurationVar(&reloadInterval, "config-reload-interval", 30*time.Second, "How often the pool configuration file is re-read.")
+	flag.DurationVar(&rescanInterval, "rescan-interval", 30*time.Second, "How often the node's links are rescanned and republished.")
 	flag.StringVar(&kubeletRootDir, "kubelet-root-dir", "/var/lib/kubelet", "The kubelet data directory (its --root-dir). The driver's registration socket lives under <dir>/plugins_registry and its dra.sock under <dir>/plugins/<driver-name>. Set this to match the kubelet --root-dir on clusters that relocate it.")
 	flag.StringVar(&featureGates, "feature-gates", "", "A set of key=value pairs that describe feature gates for alpha/experimental features.")
 
@@ -173,7 +171,7 @@ func main() {
 		}
 		opts = append(opts, driver.WithFilter(prg))
 	}
-	db := macvtap.New(configPath, nodeName, macvtap.WithReloadInterval(reloadInterval))
+	db := macvtap.New(nodeName, macvtap.WithRescanInterval(rescanInterval))
 	opts = append(opts, driver.WithInventory(db))
 	macvtapDriver, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
 	if err != nil {

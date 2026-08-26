@@ -24,6 +24,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/dranet/internal/nlwrap"
 	"sigs.k8s.io/dranet/pkg/macvtap"
@@ -52,13 +53,20 @@ type macvtapInventory interface {
 }
 
 // macvtapSpecOf resolves the macvtap creation spec of a device, when the
-// inventory serves macvtap pools and the device belongs to one.
+// inventory serves macvtap parents and the device is one.
 func macvtapSpecOf(db inventoryDB, deviceName string) (macvtap.Spec, bool) {
 	mvdb, ok := db.(macvtapInventory)
 	if !ok {
 		return macvtap.Spec{}, false
 	}
 	return mvdb.GetMacvtapSpec(deviceName)
+}
+
+// macvtapStoreKey keys a shared macvtap parent's per-claim entry in the pod
+// config store; the published device name alone would collide when one pod
+// carries two claims on the same parent.
+func macvtapStoreKey(deviceName string, claimUID types.UID, requestName string) string {
+	return fmt.Sprintf("%s@%s@%s", deviceName, claimUID, requestName)
 }
 
 // ensureMacvtapDevice (re)creates the macvtap child link for one allocated

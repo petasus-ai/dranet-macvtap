@@ -171,7 +171,13 @@ func (np *NetworkDriver) runPodSandbox(ctx context.Context, pod *api.PodSandbox,
 	// Track all the status updates needed for the resource claims of the pod.
 	statusUpdates := map[types.NamespacedName]*resourceapply.ResourceClaimStatusApplyConfiguration{}
 	// Process the configurations of the ResourceClaim
-	for deviceName, config := range podConfig.DeviceConfigs {
+	for storeKey, config := range podConfig.DeviceConfigs {
+		// The store key diverges from the published device name for shared
+		// macvtap parents (per-claim entries).
+		deviceName := config.DeviceName
+		if deviceName == "" {
+			deviceName = storeKey
+		}
 		logger.V(4).Info("RunPodSandbox processing device", "device", deviceName, "config", fmt.Sprintf("%#v", config))
 		resourceClaim := types.NamespacedName{Name: config.Claim.Name, Namespace: config.Claim.Namespace}
 		resourceClaimStatus := statusUpdates[resourceClaim]

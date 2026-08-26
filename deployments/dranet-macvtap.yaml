@@ -1,8 +1,9 @@
-# dranet-macvtap: DRA kubelet plugin that advertises macvtap slot pools on
-# host parent interfaces and attaches macvtap children (plus their /dev/tapN
-# character device) to pods. Pool definitions come from the
-# dranet-macvtap-config ConfigMap; the file is re-read periodically, so
-# pool edits need no driver restart.
+# dranet-macvtap: DRA kubelet plugin that advertises every eligible host
+# parent interface (physical/bond/vlan) as ONE shared DRA device
+# (allowMultipleAllocations with a slots capacity; selection policy lives in
+# DeviceClass CEL on the management side) and attaches a per-claim macvtap
+# child (plus its /dev/tapN character device) to pods. The node's links are
+# rescanned periodically, so parent add/remove needs no driver restart.
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -140,9 +141,6 @@ spec:
               mountPropagation: HostToContainer
             - name: state
               mountPath: /var/run/dranet-macvtap
-            - name: config
-              mountPath: /etc/dranet-macvtap
-              readOnly: true
       volumes:
         - name: kubelet-plugins
           hostPath:
@@ -163,6 +161,3 @@ spec:
           hostPath:
             path: /var/run/dranet-macvtap
             type: DirectoryOrCreate
-        - name: config
-          configMap:
-            name: dranet-macvtap-config

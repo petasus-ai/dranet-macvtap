@@ -48,6 +48,11 @@ type PodConfig struct {
 type DeviceConfig struct {
 	Claim types.NamespacedName `json:"claim"`
 
+	// DeviceName is the published ResourceSlice device name. It can differ
+	// from the store key: a shared macvtap parent device backs several claims
+	// (allowMultipleAllocations), so those entries are keyed per claim.
+	DeviceName string `json:"deviceName,omitempty"`
+
 	// DeviceSnapshot contains the original discovered ResourceSlice Device structure,
 	// which includes the device's identifying attributes and capacity.
 	DeviceSnapshot *resourceapi.Device `json:"deviceSnapshot,omitempty"`

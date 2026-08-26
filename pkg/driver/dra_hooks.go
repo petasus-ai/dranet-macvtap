@@ -249,9 +249,13 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 				Namespace: claim.Namespace,
 				Name:      claim.Name,
 			},
+			DeviceName:                  result.Device,
 			NetworkInterfaceConfigInPod: netconf,
 			DeviceSnapshot:              deviceSnapshot,
 		}
+		// Per-pod store key; diverges from the device name for shared
+		// macvtap parents below.
+		storeKey := result.Device
 
 		// Store early to guarantee profile cleanup on subsequent failures within this loop.
 		// If the preparation fails later, Kubelet will call UnprepareResourceClaims,
@@ -296,14 +300,17 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			continue
 		}
 
-		// Macvtap pool device: the netdev does not exist until the driver
-		// creates the child link on the pool's parent interface.
+		// Macvtap parent device: the netdev does not exist until the driver
+		// creates the child link on the parent interface. The parent is
+		// shared across claims (allowMultipleAllocations), so the child name
+		// and the store key are per claim.
+		var ifName string
 		if spec, isMacvtap := macvtapSpecOf(np.netdb, result.Device); isMacvtap {
 			if netconf.Interface.DHCP != nil && *netconf.Interface.DHCP {
 				errorList = append(errorList, fmt.Errorf("DHCP is not supported for macvtap device %s", result.Device))
 				continue
 			}
-			hostIfName := macvtap.HostIfName(result.Device)
+			hostIfName := macvtap.HostIfName(result.Device, claim.UID, requestName)
 			tapDev, err := ensureMacvtapDevice(hostIfName, spec)
 			if err != nil {
 				errorList = append(errorList, fmt.Errorf("failed to create macvtap for device %s: %v", result.Device, err))
@@ -311,12 +318,14 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			}
 			deviceCfg.MacvtapHostIfName = hostIfName
 			deviceCfg.TapDevice = &tapDev
-		}
-
-		ifName, err := np.netdb.GetNetInterfaceName(result.Device)
-		if err != nil {
-			errorList = append(errorList, fmt.Errorf("failed to get network interface name for device %s: %v", result.Device, err))
-			continue
+			storeKey = macvtapStoreKey(result.Device, claim.UID, requestName)
+			ifName = hostIfName
+		} else {
+			ifName, err = np.netdb.GetNetInterfaceName(result.Device)
+			if err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to get network interface name for device %s: %v", result.Device, err))
+				continue
+			}
 		}
 		// Get Network configuration and merge it
 		link, err := nlHandle.LinkByName(ifName)
@@ -473,7 +482,7 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			}
 		}
 
-		if err := np.podConfigStore.SetDeviceConfig(podUID, result.Device, deviceCfg); err != nil {
+		if err := np.podConfigStore.SetDeviceConfig(podUID, storeKey, deviceCfg); err != nil {
 			errorList = append(errorList, fmt.Errorf("failed to persist device config for pod %s device %s: %v", podUID, result.Device, err))
 		}
 		klog.V(4).Infof("Claim Resources for pod %s : %#v", podUID, deviceCfg)
@@ -539,8 +548,12 @@ func (np *NetworkDriver) unprepareResourceClaim(_ context.Context, claim kubelet
 		if !ok {
 			continue
 		}
-		for deviceName, devCfg := range podCfg.DeviceConfigs {
+		for storeKey, devCfg := range podCfg.DeviceConfigs {
 			if devCfg.Claim.Namespace == claim.Namespace && devCfg.Claim.Name == claim.Name {
+				deviceName := devCfg.DeviceName
+				if deviceName == "" {
+					deviceName = storeKey
+				}
 				if devCfg.NetworkInterfaceConfigInPod.Profile != "" {
 					if err := np.netdb.ReleaseProfileConfig(deviceName, claim.UID, &devCfg.NetworkInterfaceConfigInPod); err != nil {
 						klog.Errorf("failed to release profile config for claim %v: %v", claim.NamespacedName, err)
