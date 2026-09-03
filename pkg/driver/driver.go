@@ -41,6 +41,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	drahealthv1alpha1 "k8s.io/kubelet/pkg/apis/dra-health/v1alpha1"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 	"k8s.io/utils/clock"
 )
@@ -104,6 +105,9 @@ func WithKubeletRootDir(dir string) Option {
 }
 
 type NetworkDriver struct {
+	// Registers the DRAResourceHealth service with the kubelet plugin helper.
+	drahealthv1alpha1.UnimplementedDRAResourceHealthServer
+
 	draPlugin     pluginHelper
 	driverName    string
 	eventRecorder record.EventRecorder
