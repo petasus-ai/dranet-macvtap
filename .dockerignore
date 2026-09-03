@@ -1,0 +1,13 @@
+# Only the Go sources reach the build context; everything else would just
+# invalidate the layer cache.
+.git
+.github
+bin
+deployments
+examples
+hack
+tests
+*.md
+Dockerfile*
+install*.yaml
+kind.yaml
