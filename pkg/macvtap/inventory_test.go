@@ -65,6 +65,9 @@ func TestBuildDevices(t *testing.T) {
 	byName := map[string]int{}
 	for i, dev := range devices {
 		byName[dev.Name] = i
+		if got := dev.Attributes[AttrDomain+"/nodeName"].StringValue; got == nil || *got != "node-1" {
+			t.Errorf("device %s: nodeName = %v, want node-1", dev.Name, got)
+		}
 	}
 
 	idx, ok := byName["eno1"]

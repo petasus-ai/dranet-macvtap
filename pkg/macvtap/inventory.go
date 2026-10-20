@@ -211,6 +211,7 @@ func (inv *Inventory) buildDevices() ([]resourceapi.Device, map[string]Spec) {
 			Name:                     name,
 			AllowMultipleAllocations: ptr.To(true),
 			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+				AttrDomain + "/nodeName":   {StringValue: ptr.To(inv.nodeName)},
 				AttrDomain + "/ifName":     {StringValue: ptr.To(attrs.Name)},
 				AttrDomain + "/mtu":        {IntValue: ptr.To(int64(attrs.MTU))},
 				AttrDomain + "/state":      {StringValue: ptr.To(strings.ToLower(attrs.OperState.String()))},

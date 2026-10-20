@@ -12,7 +12,10 @@ Driver name: `macvtap.petasus.io`.
   sub-interfaces (Ethernet encapsulation, not loopback) — is auto-discovered
   and published as ONE shared ResourceSlice device (`allowMultipleAllocations:
   true`) with the attributes
-  `macvtap.petasus.io/{ifName,mtu,state,linkKind,deviceType}` and the
+  `macvtap.petasus.io/{nodeName,ifName,mtu,state,linkKind,deviceType}`
+  (`nodeName` is the node the slice is published for, so a DeviceClass CEL
+  can select a parent interface per node — CEL sees device attributes only)
+  and the
   consumable capacity `macvtap.petasus.io/slots: 999` (request policy: every
   allocation consumes exactly 1 slot). There is no driver configuration;
   selection policy lives entirely in DeviceClass CEL over the published
