@@ -191,6 +191,9 @@ func (np *NetworkDriver) runPodSandbox(ctx context.Context, pod *api.PodSandbox,
 			WithDevice(deviceName).
 			WithDriver(np.driverName).
 			WithPool(np.nodeName)
+		if config.ShareID != "" {
+			resourceClaimStatusDevice.WithShareID(config.ShareID)
+		}
 
 		ifName := config.NetworkInterfaceConfigInHost.Interface.Name
 

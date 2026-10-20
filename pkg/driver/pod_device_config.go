@@ -53,6 +53,10 @@ type DeviceConfig struct {
 	// (allowMultipleAllocations), so those entries are keyed per claim.
 	DeviceName string `json:"deviceName,omitempty"`
 
+	// ShareID is the allocation share of a device that allows multiple
+	// allocations; status.devices entries must carry it to match the result.
+	ShareID string `json:"shareID,omitempty"`
+
 	// DeviceSnapshot contains the original discovered ResourceSlice Device structure,
 	// which includes the device's identifying attributes and capacity.
 	DeviceSnapshot *resourceapi.Device `json:"deviceSnapshot,omitempty"`

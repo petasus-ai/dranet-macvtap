@@ -21,10 +21,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/dranet/pkg/apis"
 	"sigs.k8s.io/dranet/pkg/inventory"
@@ -669,5 +674,59 @@ func TestRemovePodSandboxMetrics(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunPodSandboxReportsShareID(t *testing.T) {
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "claim1"}}
+	kubeClient := fake.NewClientset(claim)
+	store := mustNewPodConfigStore()
+	podUID := types.UID("shared-pod")
+	// No host interface and no RDMA link: runPodSandbox only reports status.
+	if err := store.SetDeviceConfig(podUID, "eth1-claim1", DeviceConfig{
+		Claim:      types.NamespacedName{Namespace: "ns", Name: "claim1"},
+		DeviceName: "eth1",
+		ShareID:    "share-1",
+	}); err != nil {
+		t.Fatalf("SetDeviceConfig() error: %v", err)
+	}
+	np := &NetworkDriver{
+		driverName:     "macvtap.petasus.io",
+		nodeName:       "node1",
+		kubeClient:     kubeClient,
+		podConfigStore: store,
+		netdb:          inventory.New(),
+		eventRecorder:  record.NewFakeRecorder(100),
+	}
+	pod := &api.PodSandbox{
+		Uid:       string(podUID),
+		Name:      "shared-pod",
+		Namespace: "ns",
+		Linux: &api.LinuxPodSandbox{
+			Namespaces: []*api.LinuxNamespace{{Type: "network", Path: "/var/run/netns/test"}},
+		},
+	}
+	if err := np.RunPodSandbox(context.Background(), pod); err != nil {
+		t.Fatalf("RunPodSandbox() error: %v", err)
+	}
+
+	var devices []resourceapi.AllocatedDeviceStatus
+	err := wait.PollUntilContextTimeout(context.Background(), 10*time.Millisecond, 3*time.Second, true,
+		func(ctx context.Context) (bool, error) {
+			got, err := kubeClient.ResourceV1().ResourceClaims("ns").Get(ctx, "claim1", metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+			devices = got.Status.Devices
+			return len(devices) > 0, nil
+		})
+	if err != nil {
+		t.Fatalf("claim status was not updated: %v", err)
+	}
+	if len(devices) != 1 || devices[0].Device != "eth1" || devices[0].Pool != "node1" {
+		t.Fatalf("unexpected status devices %+v", devices)
+	}
+	if devices[0].ShareID == nil || *devices[0].ShareID != "share-1" {
+		t.Fatalf("status device shareID = %v, want share-1", devices[0].ShareID)
 	}
 }

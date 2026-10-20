@@ -253,6 +253,9 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			NetworkInterfaceConfigInPod: netconf,
 			DeviceSnapshot:              deviceSnapshot,
 		}
+		if result.ShareID != nil {
+			deviceCfg.ShareID = string(*result.ShareID)
+		}
 		// Per-pod store key; diverges from the device name for shared
 		// macvtap parents below.
 		storeKey := result.Device
