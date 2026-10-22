@@ -72,6 +72,8 @@ type DeviceConfig struct {
 	// RDMADevice holds RDMA-specific configurations if the network device
 	// has associated RDMA capabilities.
 	RDMADevice RDMAConfig `json:"rdmaDevice,omitempty"`
+
+	CarryDeviceConfig // this fork's additions (carry.go)
 }
 
 // NetworkInterfaceState is the driver-recorded runtime counterpart of an

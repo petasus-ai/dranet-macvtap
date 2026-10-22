@@ -114,6 +114,7 @@ func (np *NetworkDriver) createContainer(_ context.Context, _ *api.PodSandbox, _
 				Minor: dev.Minor,
 			})
 		}
+		np.addCarryContainerDevices(adjust, config, devPaths)
 	}
 
 	return adjust, nil, nil
@@ -158,7 +159,8 @@ func (np *NetworkDriver) runPodSandbox(ctx context.Context, pod *api.PodSandbox,
 	// Track all the status updates needed for the resource claims of the pod.
 	statusUpdates := map[types.NamespacedName]*resourceapply.ResourceClaimStatusApplyConfiguration{}
 	// Process the configurations of the ResourceClaim
-	for deviceName, config := range podConfig.DeviceConfigs {
+	for storeKey, config := range podConfig.DeviceConfigs {
+		deviceName := carryDeviceName(storeKey, config)
 		logger.V(4).Info("RunPodSandbox processing device", "device", deviceName, "config", fmt.Sprintf("%#v", config))
 		resourceClaim := types.NamespacedName{Name: config.Claim.Name, Namespace: config.Claim.Namespace}
 		resourceClaimStatus := statusUpdates[resourceClaim]
@@ -172,6 +174,7 @@ func (np *NetworkDriver) runPodSandbox(ctx context.Context, pod *api.PodSandbox,
 			WithDevice(deviceName).
 			WithDriver(np.driverName).
 			WithPool(np.nodeName)
+		np.carryDeviceStatus(config, resourceClaimStatusDevice)
 
 		ifName := config.NetworkInterfaceConfigInHost.Interface.Name
 
@@ -438,6 +441,9 @@ func (np *NetworkDriver) stopPodSandbox(ctx context.Context, pod *api.PodSandbox
 	}
 	needsRescan := false
 	for deviceName, config := range podConfig.DeviceConfigs {
+		if np.stopCarryDevice(ctx, ns, deviceName, config) {
+			continue
+		}
 		// Move the RDMA device back to the host namespace BEFORE the netdev.
 		// nsDetachNetdev calls LinkSetUp on the VF in the host namespace, which
 		// triggers a NEWLINK event causing the inventory to rescan. If the RDMA

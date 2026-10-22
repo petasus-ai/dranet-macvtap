@@ -116,6 +116,8 @@ type NetworkDriver struct {
 	kubeletRootDir string
 
 	clock clock.WithTicker // Injectable clock for testing
+
+	carryState // this fork's additions (carry.go)
 }
 
 type Option func(*NetworkDriver)
@@ -155,6 +157,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin path %s: %v", driverPluginPath, err)
 	}
+	plugin.initCarry(driverPluginPath)
 
 	// Derive the registration and plugin data directories from the kubelet root
 	// dir so they are correct when the kubelet uses a non-default --root-dir. At
@@ -168,6 +171,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		kubeletplugin.PluginDataDirectoryPath(driverPluginPath),
 		kubeletplugin.HealthService(false),
 	}
+	kubeletOpts = append(kubeletOpts, plugin.carryKubeletOptions()...)
 	d, err := kubeletplugin.Start(ctx, plugin, kubeletOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("start kubelet plugin: %w", err)
