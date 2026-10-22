@@ -230,7 +230,8 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 func (np *NetworkDriver) prepareDevice(ctx context.Context, nlHandle nlwrap.Handle, claim *resourceapi.ResourceClaim, podUID types.UID, result resourceapi.DeviceRequestAllocationResult, rulesByTable map[int][]apis.RuleConfig) error {
 	// Idempotency check: reuse the device configuration if it already exists, as a
 	// second resolution would allocate new profile resources and leak the stored ones.
-	if _, ok := np.podConfigStore.GetDeviceConfig(podUID, result.Device); ok {
+	storeKey := np.deviceStoreKey(claim, result)
+	if _, ok := np.podConfigStore.GetDeviceConfig(podUID, storeKey); ok {
 		klog.V(4).Infof("device %s of pod %s is already prepared, reusing the stored configuration", result.Device, podUID)
 		return nil
 	}
@@ -328,10 +329,11 @@ func (np *NetworkDriver) prepareDevice(ctx context.Context, nlHandle nlwrap.Hand
 		return nil
 	}
 
-	ifName, err := np.netdb.GetNetInterfaceName(result.Device)
+	ifName, err := np.prepareCarryNetdev(claim, result, &deviceCfg)
 	if err != nil {
 		return fmt.Errorf("failed to get network interface name for device %s: %v", result.Device, err)
 	}
+	defer func() { np.rollbackCarryNetdev(deviceCommitted, deviceCfg) }()
 	// Get Network configuration and merge it
 	link, err := nlHandle.LinkByName(ifName)
 	if err != nil {
@@ -506,7 +508,7 @@ func (np *NetworkDriver) prepareDevice(ctx context.Context, nlHandle nlwrap.Hand
 		}
 	}
 
-	if err := np.podConfigStore.SetDeviceConfig(podUID, result.Device, deviceCfg); err != nil {
+	if err := np.podConfigStore.SetDeviceConfig(podUID, storeKey, deviceCfg); err != nil {
 		return fmt.Errorf("failed to persist device config for pod %s device %s: %v", podUID, result.Device, err)
 	}
 	deviceCommitted = true
@@ -588,8 +590,11 @@ func (np *NetworkDriver) unprepareResourceClaim(_ context.Context, claim kubelet
 		}
 	}
 
-	_, err := np.podConfigStore.DeleteClaim(claim.NamespacedName)
-	return err
+	if _, err := np.podConfigStore.DeleteClaim(claim.NamespacedName); err != nil {
+		return err
+	}
+	np.unprepareCarryClaim(claim)
+	return nil
 }
 
 func (np *NetworkDriver) HandleError(ctx context.Context, err error, msg string) {
@@ -601,10 +606,9 @@ func (np *NetworkDriver) HandleError(ctx context.Context, err error, msg string)
 // WatchHealthStatus implements the DRAPlugin contract, which requires this
 // method as of Kubernetes 1.37:
 // https://github.com/kubernetes/kubernetes/pull/139477
-// DRANET disables the optional health service, so this method is not called.
 // TODO: This function should be implemented as part of https://github.com/kubernetes-sigs/dranet/issues/293
-func (np *NetworkDriver) WatchHealthStatus(context.Context, chan<- kubeletplugin.DeviceHealthReport) error {
-	return kubeletplugin.ErrHealthNotSupported
+func (np *NetworkDriver) WatchHealthStatus(ctx context.Context, reports chan<- kubeletplugin.DeviceHealthReport) error {
+	return np.watchCarryHealth(ctx, reports)
 }
 
 func formatDeviceNames(devices []resourceapi.Device, max int) string {
