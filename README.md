@@ -1,3 +1,89 @@
+# dranet-macvtap
+
+DRA driver (fork of [kubernetes-sigs/dranet](https://github.com/kubernetes-sigs/dranet))
+that gives KubeVirt VMs macvtap secondary NICs on a host parent interface,
+allocated through `resource.k8s.io/v1`.
+
+Driver name: `macvtap.petasus.io`.
+
+## How it works
+
+- Every eligible host parent interface — physical NICs, bonds and VLAN
+  sub-interfaces (Ethernet encapsulation, not loopback) — is auto-discovered
+  and published as ONE shared ResourceSlice device (`allowMultipleAllocations:
+  true`) with the attributes
+  `macvtap.petasus.io/{nodeName,ifName,mtu,state,linkKind,deviceType}`
+  (`nodeName` is the node the slice is published for, so a DeviceClass CEL
+  can select a parent interface per node — CEL sees device attributes only)
+  and the
+  consumable capacity `macvtap.petasus.io/slots: 128` (request policy: every
+  allocation consumes exactly 1 slot). There is no driver configuration;
+  selection policy lives entirely in DeviceClass CEL over the published
+  attributes. The node's links are rescanned periodically
+  (`--rescan-interval`), so parent add/remove needs no driver restart.
+
+- On `NodePrepareResources` the driver creates the per-claim macvtap child on
+  the parent (host-side name `mvt` + 12 hex chars, hashed from device + claim
+  + request — a shared parent backs several claims) in bridge mode and
+  resolves its `/dev/tap<ifindex>` character device.
+
+- Via NRI, the tap character device is injected into the pod's containers
+  owned by uid/gid 107 (qemu in virt-launcher), and on `RunPodSandbox` the
+  link is moved into the pod network namespace, renamed and configured from
+  the claim's opaque config (dranet `NetworkConfig`):
+
+  ```yaml
+  config:
+    - requests: ["nic"]
+      opaque:
+        driver: macvtap.petasus.io
+        parameters:
+          interface:
+            name: pod0123456789a   # pod interface name KubeVirt expects
+            hardwareAddr: "02:00:00:aa:bb:cc"
+            mtu: 1500
+  ```
+
+- On pod stop the link is deleted; `NodeUnprepareResources` removes host-side
+  leftovers of pods that never started. DHCP addressing is refused.
+
+- The claim status reports each device with its allocation `shareID`.
+
+KubeVirt consumes the device with the zero-code `macvtap` network binding
+plugin (`domainAttachmentType: tap`) and `spec.networks[].resourceClaim`
+(`NetworkDevicesWithDRA` feature gate).
+
+## Deploy
+
+```sh
+kubectl apply -f deployments/dranet-macvtap.yaml
+kubectl apply -f deployments/examples/bundang-10f-rtx.yaml   # example DeviceClass + claim
+```
+
+## Fork layout
+
+The fork follows upstream `main`; the commits on top of it are the whole
+difference, kept small so a sync is a plain rebase:
+
+- `pkg/macvtap/**`: the parent inventory.
+- `pkg/driver/carry.go`, `pkg/driver/macvtapdevice.go`: the driver
+  additions. Upstream files call them through one-line hooks (the same ones
+  as dranet-vfio's) and embed `carryState` / `CarryDeviceConfig`; nothing
+  else in `pkg/driver` differs from upstream.
+- `cmd/dranet-macvtap`: the entry point (`cmd/dranet` stays upstream's).
+- `Dockerfile.petasus`, `.github/workflows/build-push.yaml`: the image
+  `quay.io/edgestack/dranet-macvtap` (`main` → `latest`, `v*` tags, and a
+  `sync/*` branch → its slug). Upstream's own workflows are disabled in this
+  repository.
+
+To sync: `git fetch --no-tags upstream main`, then
+`git rebase --onto upstream/main <previous upstream base> main`; conflicts
+can only come from the hook lines.
+
+The upstream dranet documentation below describes the inherited machinery.
+
+---
+
 # DRANET: DRA Kubernetes Network Driver
 
 DRANET is a Kubernetes Network Driver that uses Dynamic Resource Allocation
