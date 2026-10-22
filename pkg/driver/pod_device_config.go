@@ -144,6 +144,8 @@ type Checkpointer interface {
 	Store(podUID types.UID, deviceName string, config DeviceConfig) error
 	// DeletePod removes all persisted state for the given pod.
 	DeletePod(podUID types.UID) error
+	// DeleteDevice removes the persisted state for one pod/device pair.
+	DeleteDevice(podUID types.UID, deviceName string) error
 	// Close releases any resources held by the checkpointer.
 	Close() error
 }
@@ -351,30 +353,43 @@ func (s *PodConfigStore) SetPodNetNs(podUID types.UID, netns string) {
 
 // DeleteClaim removes all configurations and allocated IPs associated with a given
 // claim and returns the list of Pod UIDs that were associated with it.
+// Only the claim's device entries go, never the whole pod: a pod with several
+// claims (a VM with several NICs) still needs its remaining devices' state for
+// their own unprepare. A pod whose last device is removed is dropped entirely.
 // Like DeletePod, checkpoint failures do not prevent in-memory cleanup.
 // See DeletePod for rationale on this intentional asymmetry with SetDeviceConfig.
 func (s *PodConfigStore) DeleteClaim(claim types.NamespacedName) []types.UID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	podsToDelete := []types.UID{}
+	affectedPods := []types.UID{}
 	for uid, podConfig := range s.configs {
-		for _, config := range podConfig.DeviceConfigs {
-			if config.Claim == claim {
-				podsToDelete = append(podsToDelete, uid)
-				break // Found a match for this pod, no need to check other devices for the same pod
+		matched := false
+		for deviceName, config := range podConfig.DeviceConfigs {
+			if config.Claim != claim {
+				continue
 			}
+			matched = true
+			if s.checkpointer != nil {
+				if err := s.checkpointer.DeleteDevice(uid, deviceName); err != nil {
+					klog.Errorf("failed to delete checkpoint for pod %s device %s: %v", uid, deviceName, err)
+				}
+			}
+			delete(podConfig.DeviceConfigs, deviceName)
+		}
+		if !matched {
+			continue
+		}
+		affectedPods = append(affectedPods, uid)
+		if len(podConfig.DeviceConfigs) == 0 {
+			if s.checkpointer != nil {
+				if err := s.checkpointer.DeletePod(uid); err != nil {
+					klog.Errorf("failed to delete checkpoint for pod %s: %v", uid, err)
+				}
+			}
+			delete(s.configs, uid)
 		}
 	}
-
-	for _, uid := range podsToDelete {
-		if s.checkpointer != nil {
-			if err := s.checkpointer.DeletePod(uid); err != nil {
-				klog.Errorf("failed to delete checkpoint for pod %s: %v", uid, err)
-			}
-		}
-		delete(s.configs, uid)
-	}
-	return podsToDelete
+	return affectedPods
 }
 
 // GetAllocatedDeviceSnapshots returns all devices currently allocated to active pods

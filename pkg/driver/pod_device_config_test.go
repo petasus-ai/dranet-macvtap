@@ -323,6 +323,22 @@ func TestPodConfigStore_DeleteClaim(t *testing.T) {
 			},
 		},
 		{
+			// A VM pod with two NICs holds one device per claim; deleting
+			// one claim must keep the sibling device's state for its own
+			// unprepare.
+			name: "delete one claim of a pod holding several claims",
+			initialConfigs: func() *PodConfigStore {
+				s := mustNewPodConfigStore()
+				s.SetDeviceConfig(podUID1, dev1, config1_1)                   // Pod1, Dev1, Claim1
+				s.SetDeviceConfig(podUID1, dev2, DeviceConfig{Claim: claim2}) // Pod1, Dev2, Claim2
+				return s
+			},
+			claimToDelete: claim1,
+			expectedPodsAfter: map[types.UID]PodConfig{
+				podUID1: {DeviceConfigs: map[string]DeviceConfig{dev2: {Claim: claim2}}},
+			},
+		},
+		{
 			name: "delete non-existent claim",
 			initialConfigs: func() *PodConfigStore {
 				s := mustNewPodConfigStore()
