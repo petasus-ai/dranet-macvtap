@@ -588,8 +588,8 @@ func (np *NetworkDriver) unprepareResourceClaim(_ context.Context, claim kubelet
 		}
 	}
 
-	np.podConfigStore.DeleteClaim(claim.NamespacedName)
-	return nil
+	_, err := np.podConfigStore.DeleteClaim(claim.NamespacedName)
+	return err
 }
 
 func (np *NetworkDriver) HandleError(ctx context.Context, err error, msg string) {

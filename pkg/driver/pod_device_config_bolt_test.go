@@ -391,3 +391,66 @@ func TestPodConfigStore_NoCheckpointer(t *testing.T) {
 		t.Errorf("Close() error: %v", err)
 	}
 }
+
+// failingDeleteCheckpointer fails DeleteDevice while err is set.
+type failingDeleteCheckpointer struct {
+	Checkpointer
+	err error
+}
+
+func (c *failingDeleteCheckpointer) DeleteDevice(podUID types.UID, deviceName string) error {
+	if c.err != nil {
+		return c.err
+	}
+	return c.Checkpointer.DeleteDevice(podUID, deviceName)
+}
+
+// A device entry whose checkpoint deletion fails stays, in memory and on disk,
+// and fails DeleteClaim so the unprepare is retried; the retry removes it.
+func TestPodConfigStore_DeleteClaimKeepsUndeletedEntries(t *testing.T) {
+	disk := newTestBoltCheckpointer(t)
+	cp := &failingDeleteCheckpointer{Checkpointer: disk, err: fmt.Errorf("disk full")}
+	store, err := newPodConfigStoreWithCheckpointer(cp)
+	if err != nil {
+		t.Fatalf("newPodConfigStoreWithCheckpointer() error: %v", err)
+	}
+	claim := types.NamespacedName{Namespace: "ns", Name: "c1"}
+	sibling := types.NamespacedName{Namespace: "ns", Name: "c2"}
+	if err := store.SetDeviceConfig("pod-1", "dev-a", DeviceConfig{Claim: claim}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeviceConfig("pod-1", "dev-b", DeviceConfig{Claim: sibling}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.DeleteClaim(claim); err == nil {
+		t.Fatal("DeleteClaim() succeeded although the checkpoint kept the device")
+	}
+	if _, ok := store.GetDeviceConfig("pod-1", "dev-a"); !ok {
+		t.Fatal("the entry left memory while its checkpoint stayed")
+	}
+	data, err := disk.GetOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := data["pod-1"]["dev-a"]; !ok {
+		t.Fatal("the checkpoint lost the device although DeleteDevice failed")
+	}
+
+	cp.err = nil
+	if _, err := store.DeleteClaim(claim); err != nil {
+		t.Fatalf("DeleteClaim() retry error: %v", err)
+	}
+	if _, ok := store.GetDeviceConfig("pod-1", "dev-a"); ok {
+		t.Fatal("the entry is still in memory after the retry")
+	}
+	if data, err = disk.GetOrCreate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := data["pod-1"]["dev-a"]; ok {
+		t.Fatal("the device is still checkpointed after the retry")
+	}
+	if _, ok := data["pod-1"]["dev-b"]; !ok {
+		t.Fatal("the sibling claim's device left the checkpoint")
+	}
+}

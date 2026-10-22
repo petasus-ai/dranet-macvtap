@@ -198,6 +198,24 @@ func (c *boltCheckpointer) GetOrCreate() (map[types.UID]map[string]DeviceConfig,
 	return result, nil
 }
 
+func (c *boltCheckpointer) DeleteDevice(podUID types.UID, deviceName string) error {
+	return c.db.Update(func(tx *bolt.Tx) error {
+		root := tx.Bucket(podConfigsBucket)
+		if root == nil {
+			return nil
+		}
+		podBucket := root.Bucket([]byte(podUID))
+		if podBucket == nil {
+			return nil
+		}
+		devBucket := podBucket.Bucket(deviceConfigsKey)
+		if devBucket == nil {
+			return nil
+		}
+		return devBucket.Delete([]byte(deviceName))
+	})
+}
+
 func (c *boltCheckpointer) DeletePod(podUID types.UID) error {
 	return c.db.Update(func(tx *bolt.Tx) error {
 		root := tx.Bucket(podConfigsBucket)
