@@ -1,0 +1,48 @@
+# Example DeviceClass for the bundang-10f-rtx cluster: macvtap NICs on the
+# 10.24.3.0/24 management interface, which is enP1p1s0f0np0 on the aarch64
+# workers and eno4 on bundang-10f-33. The driver publishes every eligible
+# parent interface as one shared device (allowMultipleAllocations, slots
+# capacity); a class selects each node's parent through nodeName. A plain
+# ifName union would also match the other node's parent name on any node that
+# has both interfaces.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: mgmt.petasus.io
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "macvtap.petasus.io" &&
+          "nodeName" in device.attributes["macvtap.petasus.io"] &&
+          "ifName" in device.attributes["macvtap.petasus.io"] &&
+          device.attributes["macvtap.petasus.io"].ifName ==
+          (device.attributes["macvtap.petasus.io"].nodeName == "bundang-10f-33" ? "eno4" : "enP1p1s0f0np0")
+---
+# A claim consumes one slot of the selected parent; the capacity request is
+# optional (the device's request policy defaults to 1) but explicit is
+# clearer.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: example-macvtap-nic
+spec:
+  devices:
+    requests:
+      - name: nic
+        exactly:
+          deviceClassName: mgmt.petasus.io
+          allocationMode: ExactCount
+          count: 1
+          capacity:
+            requests:
+              macvtap.petasus.io/slots: "1"
+    config:
+      - requests: ["nic"]
+        opaque:
+          driver: macvtap.petasus.io
+          parameters:
+            interface:
+              name: pod0123456789a
+              hardwareAddr: "02:00:00:aa:bb:cc"
+              mtu: 1500
