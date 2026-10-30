@@ -151,9 +151,31 @@ jobs:
           username: edgestack
           password: ${{ secrets.QUAY_CI_BOT_SECRET }}
 
-      # A version tag releases that tag; only a main push moves latest (the
-      # action's latest=auto flavor would add it to tag pushes as well); a
-      # sync/* branch gets its slug (sync-upstream-<sha>).
+      # latest follows the newest final release (vX.Y.Z, not an -rc), the rule the other
+      # Petasus images follow: a tag push takes it only when its tag is that release.
+      - name: Checkout the tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Decide whether this release is the newest
+        id: newest
+        env:
+          TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          latest=false
+          if [ "$IS_TAG" = true ]; then
+            release='v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+            newest="$(git tag -l 'v*' | { grep -Ex "$release" || true; } | sort -V | tail -n 1)"
+            [ "$newest" = "$TAG" ] && latest=true
+            echo "newest final release: ${newest:-none}; this tag: $TAG; latest=$latest"
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+      # A version tag releases that tag (plus latest when it is the newest final release);
+      # a main push publishes dev; a sync/* branch gets its slug (sync-upstream-<sha>).
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -164,7 +186,8 @@ jobs:
           tags: |
             type=ref,event=tag
             type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/sync/') }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ steps.newest.outputs.latest == 'true' }}
 
       - name: Create the manifest list and push
         working-directory: /tmp/digests

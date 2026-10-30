@@ -72,9 +72,9 @@ difference, kept small so a sync is a plain rebase:
   else in `pkg/driver` differs from upstream.
 - `cmd/dranet-macvtap`: the entry point (`cmd/dranet` stays upstream's).
 - `Dockerfile.petasus`, `.github/workflows/build-push.yaml`: the image
-  `quay.io/edgestack/dranet-macvtap` (`main` → `latest`, `v*` tags, and a
-  `sync/*` branch → its slug). Upstream's own workflows are disabled in this
-  repository.
+  `quay.io/edgestack/dranet-macvtap` (`main` → `dev`, `v*` tags, `latest` for the newest
+  final release, and a `sync/*` branch → its slug). Upstream's own workflows are
+  disabled in this repository.
 
 To sync: `git fetch --no-tags upstream main`, then
 `git rebase --onto upstream/main <previous upstream base> main`; conflicts
