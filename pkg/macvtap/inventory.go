@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -61,14 +63,24 @@ type Spec struct {
 	Mode   netlink.MacvlanMode
 }
 
-// NetlinkOps abstracts the netlink queries discovery needs (for testing).
+// NetlinkOps abstracts the link queries discovery needs (for testing).
 type NetlinkOps interface {
 	LinkList() ([]netlink.Link, error)
+	// PhysPortName is the link's phys_port_name, "" when it has none.
+	PhysPortName(ifName string) string
 }
 
 type defaultNetlink struct{}
 
 func (defaultNetlink) LinkList() ([]netlink.Link, error) { return netlink.LinkList() }
+
+func (defaultNetlink) PhysPortName(ifName string) string {
+	b, err := os.ReadFile(filepath.Join("/sys/class/net", ifName, "phys_port_name"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
 
 // Inventory publishes every eligible host parent interface as ONE shared DRA
 // device (allowMultipleAllocations with a slots capacity); selection policy
@@ -179,6 +191,19 @@ var eligibleParentTypes = map[string]bool{
 	"vlan":   true,
 }
 
+// aggregatingMasters are the link kinds whose ports carry no traffic of their own: a
+// macvtap child on a bond, team or bridge port bypasses (and breaks) the aggregate.
+var aggregatingMasters = map[string]bool{
+	"bond":        true,
+	"team":        true,
+	"bridge":      true,
+	"openvswitch": true,
+}
+
+// representorPortName matches the phys_port_name of a switchdev VF or SF representor
+// ("pf0vf3", "c1pf0sf2"); its traffic is the function's, not a host uplink's.
+var representorPortName = regexp.MustCompile(`^(c\d+)?pf\d+(vf|sf)\d+$`)
+
 func (inv *Inventory) buildDevices() ([]resourceapi.Device, map[string]Spec) {
 	devices := []resourceapi.Device{}
 	specs := map[string]Spec{}
@@ -189,12 +214,25 @@ func (inv *Inventory) buildDevices() ([]resourceapi.Device, map[string]Spec) {
 		return devices, specs
 	}
 
+	kindByIndex := map[int]string{}
+	for _, link := range links {
+		if attrs := link.Attrs(); attrs != nil {
+			kindByIndex[attrs.Index] = link.Type()
+		}
+	}
+
 	for _, link := range links {
 		attrs := link.Attrs()
 		if attrs == nil || attrs.Name == "" {
 			continue
 		}
 		if attrs.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if attrs.MasterIndex != 0 && aggregatingMasters[kindByIndex[attrs.MasterIndex]] {
+			continue
+		}
+		if representorPortName.MatchString(inv.netlink.PhysPortName(attrs.Name)) {
 			continue
 		}
 		// Macvtap children need an Ethernet parent (no InfiniBand, no tun).

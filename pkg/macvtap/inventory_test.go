@@ -24,10 +24,13 @@ import (
 )
 
 type fakeNetlink struct {
-	links []netlink.Link
+	links     []netlink.Link
+	portNames map[string]string
 }
 
 func (f *fakeNetlink) LinkList() ([]netlink.Link, error) { return f.links, nil }
+
+func (f *fakeNetlink) PhysPortName(ifName string) string { return f.portNames[ifName] }
 
 func linkAttrs(name, encap string, flags net.Flags, mtu int) netlink.LinkAttrs {
 	attrs := netlink.NewLinkAttrs()
@@ -110,6 +113,47 @@ func TestBuildDevices(t *testing.T) {
 	spec, ok := specs["bond0-100"]
 	if !ok || spec.Parent != "bond0.100" || spec.Mode != netlink.MACVLAN_MODE_BRIDGE {
 		t.Fatalf("unexpected spec: %#v", spec)
+	}
+}
+
+func TestBuildDevicesSkipsPortsAndRepresentors(t *testing.T) {
+	withIndex := func(attrs netlink.LinkAttrs, index, master int) netlink.LinkAttrs {
+		attrs.Index = index
+		attrs.MasterIndex = master
+		return attrs
+	}
+	nl := &fakeNetlink{
+		links: []netlink.Link{
+			&netlink.Bond{LinkAttrs: withIndex(linkAttrs("bond0", "ether", net.FlagUp, 9000), 10, 0)},
+			&netlink.Device{LinkAttrs: withIndex(linkAttrs("enp1s0f0np0", "ether", net.FlagUp, 9000), 11, 10)},
+			&netlink.Bridge{LinkAttrs: withIndex(linkAttrs("br0", "ether", net.FlagUp, 1500), 12, 0)},
+			&netlink.Device{LinkAttrs: withIndex(linkAttrs("eno2", "ether", net.FlagUp, 1500), 13, 12)},
+			&netlink.Device{LinkAttrs: withIndex(linkAttrs("enp1s0f1np1", "ether", net.FlagUp, 9000), 14, 0)},
+			&netlink.Device{LinkAttrs: withIndex(linkAttrs("enp1s0f1r3", "ether", net.FlagUp, 1500), 15, 0)},
+			&netlink.Device{LinkAttrs: withIndex(linkAttrs("enp1s0f1s0", "ether", net.FlagUp, 1500), 16, 0)},
+			&netlink.Device{LinkAttrs: withIndex(linkAttrs("enp1s0f0v1", "ether", net.FlagUp, 9000), 17, 0)},
+		},
+		portNames: map[string]string{
+			"enp1s0f1np1": "p1",
+			"enp1s0f1r3":  "pf1vf3",
+			"enp1s0f1s0":  "c1pf1sf0",
+		},
+	}
+
+	devices, _ := New("node-1", WithNetlink(nl)).buildDevices()
+
+	got := []string{}
+	for _, d := range devices {
+		got = append(got, d.Name)
+	}
+	want := []string{"bond0", "enp1s0f0v1", "enp1s0f1np1"}
+	if len(got) != len(want) {
+		t.Fatalf("published %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("published %v, want %v", got, want)
+		}
 	}
 }
 

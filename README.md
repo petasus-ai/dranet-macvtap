@@ -9,7 +9,8 @@ Driver name: `macvtap.petasus.io`.
 ## How it works
 
 - Every eligible host parent interface — physical NICs, bonds and VLAN
-  sub-interfaces (Ethernet encapsulation, not loopback) — is auto-discovered
+  sub-interfaces (Ethernet encapsulation, not loopback), except ports of a bond,
+  team or bridge and switchdev VF/SF representors — is auto-discovered
   and published as ONE shared ResourceSlice device (`allowMultipleAllocations:
   true`) with the attributes
   `macvtap.petasus.io/{nodeName,ifName,mtu,state,linkKind,deviceType}`
