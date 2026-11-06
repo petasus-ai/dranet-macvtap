@@ -40,6 +40,10 @@ type NetworkConfig struct {
 
 	// Ethtool defines hardware offload features and other settings managed by `ethtool`.
 	Ethtool *EthtoolConfig `json:"ethtool,omitempty"`
+
+	// CarryNetworkConfig holds the macvtap driver's own parameters; its fields
+	// sit at the top level of the claim's opaque config.
+	CarryNetworkConfig
 }
 
 // InterfaceConfig represents the configuration for a single network interface.

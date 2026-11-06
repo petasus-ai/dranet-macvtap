@@ -26,7 +26,11 @@ Driver name: `macvtap.petasus.io`.
 
 - On `NodePrepareResources` the driver creates the per-claim macvtap child on
   the parent (host-side name `mvt` + 12 hex chars, hashed from device + claim
-  + request — a shared parent backs several claims) in bridge mode.
+  + request — a shared parent backs several claims) in bridge mode. A claim
+  VLAN is refused outside 1-4094, on a parent that is a VLAN link itself
+  (double tagging), and where the parent or a port of a bond parent has its
+  own link of that VLAN (the kernel hands that VLAN's frames to it before the
+  children see them).
 
 - On `RunPodSandbox` (NRI) the child is moved into the pod network namespace,
   renamed and configured from the claim's opaque config (dranet
@@ -42,7 +46,27 @@ Driver name: `macvtap.petasus.io`.
             name: pod0123456789a   # pod interface name KubeVirt expects
             hardwareAddr: "02:00:00:aa:bb:cc"
             mtu: 1500
+          macvtap:
+            vlan: 1001             # optional: the one VLAN of the parent the child carries
   ```
+
+  In the pod namespace, before the child comes up, it gets a clsact qdisc (the
+  move drops qdiscs, so every sandbox gets it anew; a child an attach failure
+  returns to the host stays down there):
+
+  - with `macvtap.vlan` V, an access port of V: ingress pops tag V and drops
+    every other frame; egress drops the guest's own 802.1Q/802.1ad tags and
+    tags the rest V. A down 802.1Q link `vid<ifindex>` of V on the child
+    registers V with the parent (macvlan passes it on, a bond to its ports),
+    so a parent with hardware VLAN filtering receives the VLAN; it goes with
+    the child. One tag is popped, so a frame tagged twice reaches the guest
+    with its inner tag, as on a switch access port.
+  - without it, untagged-only: tagged frames are dropped both ways,
+    priority-tagged (VLAN 0) frames included, so a guest cannot reach other
+    VLANs of a trunk parent by tagging its own frames.
+
+  The parent device must pass the tags to the kernel (for a Cilium device,
+  `bpf.vlanBypass`).
 
 - On `CreateContainer` (NRI) the child's `/dev/tap<ifindex>` character device,
   as the child has it in the pod namespace (the move gives it a new minor), is
@@ -77,6 +101,8 @@ difference, kept small so a sync is a plain rebase:
   additions. Upstream files call them through one-line hooks and embed
   `CarryDeviceConfig`; apart from the per-claim `DeleteClaim` fix in
   `pod_device_config*.go`, nothing else in `pkg/driver` differs from upstream.
+- `pkg/apis/carry.go`: the claim parameters the fork adds (`macvtap`), embedded
+  in upstream's `NetworkConfig` as `CarryNetworkConfig`.
 - `cmd/dranet-macvtap`: the entry point (`cmd/dranet` stays upstream's).
 - `Dockerfile.petasus`, `.github/workflows/build-push.yaml`: the image
   `quay.io/edgestack/dranet-macvtap` (`main` → `dev`, `v*` tags, `latest` for the newest

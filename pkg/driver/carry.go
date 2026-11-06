@@ -24,6 +24,7 @@ package driver
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/containerd/nri/pkg/api"
@@ -129,6 +130,9 @@ func (np *NetworkDriver) prepareCarryNetdev(claim *resourceapi.ResourceClaim, re
 	if iface.IsSubinterface() {
 		return "", fmt.Errorf("interface type %s is not supported for macvtap device %s", iface.Type, result.Device)
 	}
+	if err := checkMacvtapVlan(spec.Parent, deviceCfg.NetworkInterfaceConfigInPod.Macvtap); err != nil {
+		return "", fmt.Errorf("macvtap device %s: %w", result.Device, err)
+	}
 	deviceCfg.DeviceName = result.Device
 	if result.ShareID != nil {
 		deviceCfg.ShareID = string(*result.ShareID)
@@ -205,24 +209,133 @@ func (np *NetworkDriver) carryDeviceStatus(config DeviceConfig, status *resource
 	}
 }
 
+// carryNetdevPolicies hands a macvtap child's VLAN policy from runCarryDevice
+// to its attach in the same RunPodSandbox (setupCarryNetdevInNS), keyed by
+// pod namespace and pod interface name: the attach carries only the
+// interface config. Each child holds at most one entry, so an attach that
+// failed before taking its entry leaves nothing behind once the next sandbox
+// stores its own or the child goes unused (removeUnusedMacvtaps).
+var carryNetdevPolicies = &carryPolicies{byKey: map[string]carryPolicy{}, keyOf: map[string]string{}}
+
+type carryPolicy struct {
+	hostIfName string
+	vid        int
+}
+
+type carryPolicies struct {
+	mu    sync.Mutex
+	byKey map[string]carryPolicy
+	keyOf map[string]string // host interface name -> key
+}
+
+func carryPolicyKey(nsPath string, ifName string) string {
+	return nsPath + "\x00" + ifName
+}
+
+func (p *carryPolicies) put(key string, policy carryPolicy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if old, ok := p.keyOf[policy.hostIfName]; ok {
+		delete(p.byKey, old)
+	}
+	p.byKey[key] = policy
+	p.keyOf[policy.hostIfName] = key
+}
+
+func (p *carryPolicies) take(key string) (carryPolicy, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	policy, ok := p.byKey[key]
+	if ok {
+		delete(p.byKey, key)
+		delete(p.keyOf, policy.hostIfName)
+	}
+	return policy, ok
+}
+
+// prune drops the entries of children no stored device references.
+func (p *carryPolicies) prune(inUse set.Set[string]) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for host, key := range p.keyOf {
+		if !inUse.Has(host) {
+			delete(p.byKey, key)
+			delete(p.keyOf, host)
+		}
+	}
+}
+
+func (p *carryPolicies) len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.byKey)
+}
+
 // runCarryDevice readies a carried device in RunPodSandbox before it is
 // attached. A macvtap child goes with the sandbox that held it
 // (stopCarryDevice), so a later sandbox of the pod gets a new one on the
 // stored parent: kubelet creates one for a restartPolicy Never pod (a KubeVirt
-// launcher) while none of its containers has run.
-func (np *NetworkDriver) runCarryDevice(deviceName string, config DeviceConfig) error {
+// launcher) while none of its containers has run. A child with a VLAN is
+// always created anew: one a failed attach returned to the host keeps its
+// registration link in the namespace it left, and that link would refuse a
+// second one.
+func (np *NetworkDriver) runCarryDevice(ns string, deviceName string, config DeviceConfig) error {
 	if config.MacvtapHostIfName == "" {
 		return nil
 	}
+	vid := macvtapVlanOf(config.NetworkInterfaceConfigInPod)
 	spec := macvtap.Spec{Parent: config.MacvtapParent, Mode: config.MacvtapMode}
-	if spec.Parent == "" {
-		var ok bool
-		if spec, ok = macvtapSpecOf(np.netdb, deviceName); !ok {
-			return nil
+	known := spec.Parent != ""
+	if !known {
+		spec, known = macvtapSpecOf(np.netdb, deviceName)
+	}
+	// Without a spec the child is attached as it is.
+	if known {
+		ensure := ensureHostMacvtap
+		if vid != 0 {
+			ensure = ensureMacvtapDevice
+		}
+		if err := ensure(config.MacvtapHostIfName, spec); err != nil {
+			return fmt.Errorf("macvtap device %s: %w", deviceName, err)
 		}
 	}
-	if err := ensureHostMacvtap(config.MacvtapHostIfName, spec); err != nil {
-		return fmt.Errorf("macvtap device %s: %w", deviceName, err)
+	podIfName := config.NetworkInterfaceConfigInPod.Interface.Name
+	if podIfName == "" {
+		podIfName = config.MacvtapHostIfName
+	}
+	carryNetdevPolicies.put(carryPolicyKey(ns, podIfName), carryPolicy{hostIfName: config.MacvtapHostIfName, vid: vid})
+	return nil
+}
+
+// setupCarryNetdevInNS applies the VLAN policy runCarryDevice recorded for a
+// macvtap child once the child is in the pod namespace and before it comes
+// up, so the pod's kernel never sends on it unfiltered. The move destroyed the
+// child's qdiscs, so every sandbox gets the policy anew.
+func setupCarryNetdevInNS(nsPath string, ifName string) error {
+	policy, ok := carryNetdevPolicies.take(carryPolicyKey(nsPath, ifName))
+	if !ok {
+		return nil
+	}
+	if err := applyMacvtapVlanPolicy(nsPath, ifName, policy.vid); err != nil {
+		return fmt.Errorf("macvtap child %s in ns %s: %w", ifName, nsPath, err)
+	}
+	return nil
+}
+
+// carryKeepsDetachedDown keeps a macvtap child that a failed attach returned
+// to the host down: no host workload uses it, and there it has no VLAN policy.
+func carryKeepsDetachedDown(hostIfName string) bool {
+	return macvtap.IsHostIfName(hostIfName)
+}
+
+// configureCarryNetdevInNS fails a macvtap child that reached the pod
+// namespace without its VLAN policy.
+func configureCarryNetdevInNS(nsPath string, ifNameInNs string, config DeviceConfig) error {
+	if config.MacvtapHostIfName == "" {
+		return nil
+	}
+	if err := requireMacvtapVlanPolicy(nsPath, ifNameInNs); err != nil {
+		return fmt.Errorf("macvtap child %s in ns %s: %w", ifNameInNs, nsPath, err)
 	}
 	return nil
 }

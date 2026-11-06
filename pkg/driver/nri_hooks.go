@@ -174,7 +174,7 @@ func (np *NetworkDriver) runPodSandbox(ctx context.Context, pod *api.PodSandbox,
 			WithDriver(np.driverName).
 			WithPool(np.nodeName)
 		np.carryDeviceStatus(config, resourceClaimStatusDevice)
-		if err := np.runCarryDevice(deviceName, config); err != nil {
+		if err := np.runCarryDevice(ns, deviceName, config); err != nil {
 			return err
 		}
 
@@ -343,6 +343,10 @@ func createSubinterfaceInNS(ctx context.Context, ns, deviceName string, config D
 func configureNetdevInNS(ctx context.Context, ns, deviceName string, config DeviceConfig, ifNameInNs string, resourceClaimStatusDevice *resourceapply.AllocatedDeviceStatusApplyConfiguration) error {
 	logger := klog.FromContext(ctx)
 	var err error
+
+	if err := configureCarryNetdevInNS(ns, ifNameInNs, config); err != nil {
+		return err
+	}
 
 	// Apply Ethtool configurations
 	if config.NetworkInterfaceConfigInPod.Ethtool != nil {

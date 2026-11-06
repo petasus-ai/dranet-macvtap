@@ -174,6 +174,10 @@ func setupNetdevInNS(containerNs netns.NsHandle, containerNsPath string, ifName 
 		networkData.IPs = append(networkData.IPs, address)
 	}
 
+	if err := setupCarryNetdevInNS(containerNsPath, ifName); err != nil {
+		return nil, err
+	}
+
 	err = nhNs.LinkSetUp(nsLink)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up interface %s on namespace %s: %w", nsLink.Attrs().Name, containerNsPath, err)
@@ -253,6 +257,10 @@ func nsDetachNetdevFromNS(containerNs netns.NsHandle, containerNsPath string, de
 	_, err = req.Execute(unix.NETLINK_ROUTE, 0)
 	if err != nil {
 		return fmt.Errorf("failed to move interface %s to root namespace: %w", devName, err)
+	}
+
+	if carryKeepsDetachedDown(ifName) {
+		return nil
 	}
 
 	// Set up the interface in case host network workloads depend on it
