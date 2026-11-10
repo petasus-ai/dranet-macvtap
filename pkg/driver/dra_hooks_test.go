@@ -1133,7 +1133,9 @@ func TestMergeDevices(t *testing.T) {
 // would allow testing of device discovery and character device aggregation logic
 // that currently depends on the host's physical hardware.
 func TestPrepareResourceClaim(t *testing.T) {
-	userns.Run(t, testPrepareResourceClaim_Namespaced, syscall.CLONE_NEWNET)
+	// Carry seam: prepare stats the RDMA character devices under /dev/infiniband,
+	// so the cases run in a mount namespace that hides the host's (carry_test.go).
+	userns.Run(t, withoutHostRDMADevicesCarry(testPrepareResourceClaim_Namespaced), syscall.CLONE_NEWNET, syscall.CLONE_NEWNS)
 }
 
 func testPrepareResourceClaim_Namespaced(t *testing.T) {

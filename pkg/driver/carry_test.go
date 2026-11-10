@@ -19,6 +19,8 @@ package driver
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -39,6 +41,26 @@ import (
 	"sigs.k8s.io/dranet/pkg/inventory"
 	"sigs.k8s.io/dranet/pkg/macvtap"
 )
+
+// withoutHostRDMADevicesCarry runs f with an empty tmpfs over the host's
+// /dev/infiniband. buildRDMAConfig stats rdma_cm and the device's uverbs nodes
+// there, and a test must read the same thing on a host with RDMA hardware as
+// on one without. The caller's subprocess needs its own mount namespace
+// (syscall.CLONE_NEWNS), so the mount ends with it.
+func withoutHostRDMADevicesCarry(f func(*testing.T)) func(*testing.T) {
+	return func(t *testing.T) {
+		dir := filepath.Dir(rdmaCmPath)
+		if _, err := os.Stat(dir); err == nil {
+			if err := syscall.Mount("tmpfs", dir, "tmpfs", 0, ""); err != nil {
+				t.Fatalf("failed to hide the host's %s: %v", dir, err)
+			}
+		}
+		if _, err := os.Stat(rdmaCmPath); err == nil {
+			t.Fatalf("%s is still visible to the test", rdmaCmPath)
+		}
+		f(t)
+	}
+}
 
 // fullCarryDeviceConfig populates every carried field for the checkpoint
 // wire-format fixture (fullDeviceConfig).
